@@ -1,0 +1,32 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
+import authRoutes from './routes/authRoutes.js';
+import workItemRoutes from './routes/workItemRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
+
+const app = express();
+if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
+app.use(helmet());
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+app.use(express.json({ limit: '1mb' }));
+if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: Number(process.env.AUTH_RATE_LIMIT) || 100, standardHeaders: true, legacyHeaders: false });
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, limit: Number(process.env.API_RATE_LIMIT) || 600, standardHeaders: true, legacyHeaders: false });
+app.use('/api/auth', authLimiter, authRoutes);
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'newtonite-api' }));
+app.use('/api/work-items', apiLimiter, workItemRoutes);
+app.use('/api', apiLimiter, adminRoutes);
+app.use((req, res) => res.status(404).json({ message: `Route not found: ${req.method} ${req.path}` }));
+app.use((err, _req, res, _next) => {
+  if (err?.name === 'ZodError') return res.status(400).json({ message: 'Validation failed', errors: err.errors });
+  if (err?.name === 'ValidationError') return res.status(400).json({ message: 'Validation failed', errors: Object.values(err.errors || {}).map(e => e.message) });
+  if (err?.name === 'CastError') return res.status(400).json({ message: 'Invalid identifier' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ message: 'Malformed JSON body' });
+  if (err?.code === 11000) return res.status(409).json({ message: 'A record with this value already exists' });
+  if (process.env.NODE_ENV !== 'test') console.error(err);
+  res.status(err.status || 500).json({ message: err.status ? err.message : 'Internal server error' });
+});
+export default app;
